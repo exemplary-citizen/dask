@@ -337,7 +337,7 @@ def outer(a, b):
 
     return blockwise(np.outer, "ij", a, "i", b, "j", dtype=dtype)
 
-    
+
 @derived_from(np)
 def kron(a, b):
     a = array(a, ndmin=b.ndim)
@@ -353,13 +353,14 @@ def kron(a, b):
         else:
             bs = (1,) * (nda - ndb) + bs
             nd = nda
+    out_index = range(nd)
     return blockwise(
         np.kron,
-        "ij",
+        out_index,
         a,
-        "ij",
+        out_index,
         b,
-        "ij",
+        out_index,
         dtype=np.kron(a.dtype.type(), b.dtype.type()).dtype,
     )
 
