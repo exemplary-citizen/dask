@@ -69,6 +69,7 @@ try:
         vdot,
         matmul,
         outer,
+        kron,
         apply_along_axis,
         apply_over_axes,
         result_type,
