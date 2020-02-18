@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 import dask
+from dask.utils import M
 import dask.dataframe as dd
 from dask.dataframe._compat import tm, PANDAS_GT_100
 from dask.dataframe import _compat
@@ -1409,8 +1410,6 @@ def test_groupby_not_supported():
     with pytest.raises(TypeError):
         ddf.groupby("A", as_index=False)
     with pytest.raises(TypeError):
-        ddf.groupby("A", sort=False)
-    with pytest.raises(TypeError):
         ddf.groupby("A", squeeze=True)
 
 
@@ -1953,7 +1952,7 @@ def test_groupby_cov(columns):
     cols = 3
     data = np.random.randn(rows, cols)
     df = pd.DataFrame(data, columns=columns)
-    df["key"] = np.random.randint(0, cols, size=rows)
+    df["key"] = [0] * 10 + [1] * 5 + [2] * 5
     ddf = dd.from_pandas(df, npartitions=3)
 
     expected = df.groupby("key").cov()
@@ -2329,3 +2328,94 @@ def test_groupby_split_out_multiindex(split_out, column):
     )
 
     assert_eq(ddf_result, ddf_result_so1, check_index=False)
+
+
+@pytest.mark.parametrize("backend", ["cudf", "pandas"])
+def test_groupby_large_ints_exception(backend):
+    data_source = pytest.importorskip(backend)
+    if backend == "cudf":
+        dask_cudf = pytest.importorskip("dask_cudf")
+        data_frame = dask_cudf.from_cudf
+    else:
+        data_frame = dd.from_pandas
+    max = np.iinfo(np.uint64).max
+    sqrt = max ** 0.5
+    series = data_source.Series(
+        np.concatenate([sqrt * np.arange(5), np.arange(35)])
+    ).astype("int64")
+    df = data_source.DataFrame({"x": series, "z": np.arange(40), "y": np.arange(40)})
+    ddf = data_frame(df, npartitions=1)
+    assert_eq(
+        df.groupby("x").std(),
+        ddf.groupby("x").std().compute(scheduler="single-threaded"),
+    )
+
+
+@pytest.mark.parametrize("by", ["a", "b", "c", ["a", "b"], ["a", "c"]])
+@pytest.mark.parametrize("agg", ["count", "mean", "std"])
+@pytest.mark.parametrize("sort", [True, False])
+def test_groupby_sort_argument(by, agg, sort):
+
+    df = pd.DataFrame(
+        {
+            "a": [1, 2, 3, 4, None, None, 7, 8],
+            "b": [1, 0] * 4,
+            "c": ["a", "b", None, None, "e", "f", "g", "h"],
+            "e": [4, 5, 6, 3, 2, 1, 0, 0],
+        }
+    )
+    ddf = dd.from_pandas(df, npartitions=3)
+
+    gb = ddf.groupby(by, sort=sort)
+    gb_pd = df.groupby(by, sort=sort)
+
+    # Basic groupby aggregation
+    result_1 = getattr(gb, agg)
+    result_1_pd = getattr(gb_pd, agg)
+
+    # Choose single column
+    result_2 = getattr(gb.e, agg)
+    result_2_pd = getattr(gb_pd.e, agg)
+
+    # Use `agg()` api
+    result_3 = gb.agg({"e": agg})
+    result_3_pd = gb_pd.agg({"e": agg})
+
+    if agg == "mean":
+        assert_eq(result_1(), result_1_pd().astype("float"))
+        assert_eq(result_2(), result_2_pd().astype("float"))
+        assert_eq(result_3, result_3_pd.astype("float"))
+    else:
+        assert_eq(result_1(), result_1_pd())
+        assert_eq(result_2(), result_2_pd())
+        assert_eq(result_3, result_3_pd)
+
+
+@pytest.mark.parametrize("agg", [M.sum, M.prod, M.max, M.min])
+@pytest.mark.parametrize("sort", [True, False])
+def test_groupby_sort_argument_agg(agg, sort):
+    df = pd.DataFrame({"x": [4, 2, 1, 2, 3, 1], "y": [1, 2, 3, 4, 5, 6]})
+    ddf = dd.from_pandas(df, npartitions=3)
+
+    result = agg(ddf.groupby("x", sort=sort))
+    result_pd = agg(df.groupby("x", sort=sort))
+
+    assert_eq(result, result_pd)
+    if sort:
+        # Check order of index if sort==True
+        # (no guarentee that order will match otherwise)
+        assert_eq(result.index, result_pd.index)
+
+
+def test_groupby_sort_true_split_out():
+    df = pd.DataFrame({"x": [4, 2, 1, 2, 3, 1], "y": [1, 2, 3, 4, 5, 6]})
+    ddf = dd.from_pandas(df, npartitions=3)
+
+    # Works fine for split_out==1 or sort=False/None
+    M.sum(ddf.groupby("x", sort=True), split_out=1)
+    M.sum(ddf.groupby("x", sort=False), split_out=2)
+    M.sum(ddf.groupby("x"), split_out=2)
+
+    with pytest.raises(NotImplementedError):
+        # Cannot use sort=True with split_out>1 (for now)
+        M.sum(ddf.groupby("x", sort=True), split_out=2)

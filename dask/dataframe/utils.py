@@ -22,7 +22,6 @@ from pandas.api.types import (
 # include these here for compat
 from ._compat import (  # noqa: F401
     PANDAS_VERSION,
-    PANDAS_GT_0230,
     PANDAS_GT_0240,
     PANDAS_GT_0250,
     PANDAS_GT_100,
@@ -38,6 +37,9 @@ from ..utils import asciitable, is_arraylike, Dispatch, typename
 from ..utils import is_dataframe_like as dask_is_dataframe_like
 from ..utils import is_series_like as dask_is_series_like
 from ..utils import is_index_like as dask_is_index_like
+
+# register pandas extension types
+from . import _dtypes  # noqa: F401
 
 
 def is_integer_na_dtype(t):
@@ -636,10 +638,7 @@ def check_meta(x, meta, funcname=None, numeric_equal=True):
             typename(type(x)),
         )
     elif is_dataframe_like(meta):
-        kwargs = dict()
-        if PANDAS_VERSION >= "0.23.0":
-            kwargs["sort"] = True
-        dtypes = pd.concat([x.dtypes, meta.dtypes], axis=1, **kwargs)
+        dtypes = pd.concat([x.dtypes, meta.dtypes], axis=1, sort=True)
         bad_dtypes = [
             (col, a, b)
             for col, a, b in dtypes.fillna("-").itertuples()

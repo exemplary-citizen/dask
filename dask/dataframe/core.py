@@ -413,9 +413,13 @@ class _Frame(DaskMethodsMixin, OperatorMethodMixin):
 
     def __repr__(self):
         data = self._repr_data().to_string(max_rows=5, show_dimensions=False)
-        return """Dask {klass} Structure:
+        _str_fmt = """Dask {klass} Structure:
 {data}
-Dask Name: {name}, {task} tasks""".format(
+Dask Name: {name}, {task} tasks"""
+        if len(self.columns) == 0:
+            data = data.partition("\n")[-1].replace("Index", "Divisions")
+            _str_fmt = "Empty {}".format(_str_fmt)
+        return _str_fmt.format(
             klass=self.__class__.__name__,
             data=data,
             name=key_split(self._name),
@@ -1487,7 +1491,7 @@ Dask Name: {name}, {task} tasks""".format(
                 split_every=split_every,
             )
             if isinstance(self, DataFrame):
-                result.divisions = (min(self.columns), max(self.columns))
+                result.divisions = (self.columns.min(), self.columns.max())
             return handle_out(out, result)
 
     @derived_from(pd.DataFrame)
@@ -1637,15 +1641,17 @@ Dask Name: {name}, {task} tasks""".format(
             )
         else:
             meta = self._meta_nonempty.count()
+
+            # Need the astype(int) for empty dataframes, which sum to float dtype
             result = self.reduction(
                 M.count,
-                aggregate=M.sum,
+                aggregate=_count_aggregate,
                 meta=meta,
                 token=token,
                 split_every=split_every,
             )
             if isinstance(self, DataFrame):
-                result.divisions = (min(self.columns), max(self.columns))
+                result.divisions = (self.columns.min(), self.columns.max())
             return result
 
     @derived_from(pd.DataFrame)
@@ -1678,7 +1684,7 @@ Dask Name: {name}, {task} tasks""".format(
                 enforce_metadata=False,
             )
             if isinstance(self, DataFrame):
-                result.divisions = (min(self.columns), max(self.columns))
+                result.divisions = (self.columns.min(), self.columns.max())
             return handle_out(out, result)
 
     @derived_from(pd.DataFrame)
@@ -1719,7 +1725,7 @@ Dask Name: {name}, {task} tasks""".format(
                 result = self._var_numeric(skipna, ddof, split_every)
 
             if isinstance(self, DataFrame):
-                result.divisions = (min(self.columns), max(self.columns))
+                result.divisions = (self.columns.min(), self.columns.max())
             return handle_out(out, result)
 
     def _var_numeric(self, skipna=True, ddof=1, split_every=False):
@@ -1881,7 +1887,7 @@ Dask Name: {name}, {task} tasks""".format(
             )
 
             if isinstance(self, DataFrame):
-                result.divisions = (min(self.columns), max(self.columns))
+                result.divisions = (self.columns.min(), self.columns.max())
             return result
 
     def quantile(self, q=0.5, axis=0, method="default"):
@@ -3313,6 +3319,15 @@ class DataFrame(_Frame):
         else:
             return len(s)
 
+    @property
+    def empty(self):
+        raise NotImplementedError(
+            "Checking whether a Dask DataFrame has any rows may be expensive. "
+            "However, checking the number of columns is fast. "
+            "Depending on which of these results you need, use either "
+            "`len(df.index) == 0` or `len(df.columns) == 0`"
+        )
+
     def __getitem__(self, key):
         name = "getitem-%s" % tokenize(self, key)
         if np.isscalar(key) or isinstance(key, (tuple, str)):
@@ -4158,6 +4173,8 @@ class DataFrame(_Frame):
         )
 
         if verbose:
+            import textwrap
+
             index = computations["index"]
             counts = computations["count"]
             lines.append(index_summary(index))
@@ -4165,12 +4182,36 @@ class DataFrame(_Frame):
 
             from pandas.io.formats.printing import pprint_thing
 
-            space = max([len(pprint_thing(k)) for k in self.columns]) + 3
-            column_template = "{!s:<%d} {} non-null {}" % space
+            space = max([len(pprint_thing(k)) for k in self.columns]) + 1
+            column_width = max(space, 7)
+
+            header = (
+                textwrap.dedent(
+                    """\
+             #   {{column:<{column_width}}} Non-Null Count  Dtype
+            ---  {{underl:<{column_width}}} --------------  -----"""
+                )
+                .format(column_width=column_width)
+                .format(column="Column", underl="------")
+            )
+            column_template = textwrap.dedent(
+                """\
+            {{i:^3}}  {{name:<{column_width}}} {{count}} non-null      {{dtype}}""".format(
+                    column_width=column_width
+                )
+            )
             column_info = [
-                column_template.format(pprint_thing(x[0]), x[1], x[2])
-                for x in zip(self.columns, counts, self.dtypes)
+                column_template.format(
+                    i=pprint_thing(i),
+                    name=pprint_thing(name),
+                    count=pprint_thing(count),
+                    dtype=pprint_thing(dtype),
+                )
+                for i, (name, count, dtype) in enumerate(
+                    zip(self.columns, counts, self.dtypes)
+                )
             ]
+            lines.extend(header.split("\n"))
         else:
             column_info = [index_summary(self.columns, name="Columns")]
 
@@ -4297,8 +4338,14 @@ class DataFrame(_Frame):
     def _repr_data(self):
         meta = self._meta
         index = self._repr_divisions
-        series_list = [_repr_data_series(s, index=index) for _, s in meta.iteritems()]
-        return pd.concat(series_list, axis=1)
+        cols = meta.columns
+        if len(cols) == 0:
+            series_df = pd.DataFrame([[]] * len(index), columns=cols, index=index)
+        else:
+            series_df = pd.concat(
+                [_repr_data_series(s, index=index) for _, s in meta.iteritems()], axis=1
+            )
+        return series_df
 
     _HTML_FMT = """<div><strong>Dask DataFrame Structure:</strong></div>
 {data}
@@ -4638,6 +4685,7 @@ def apply_concat_apply(
     split_out=None,
     split_out_setup=None,
     split_out_setup_kwargs=None,
+    sort=None,
     **kwargs
 ):
     """Apply a function to blocks, then concat, then apply again
@@ -4677,6 +4725,8 @@ def apply_concat_apply(
         as is.
     split_out_setup_kwargs : dict, optional
         Keywords for the `split_out_setup` function only.
+    sort : bool, default None
+        If allowed, sort the keys of the output aggregation.
     kwargs :
         All remaining keywords will be passed to ``chunk``, ``aggregate``, and
         ``combine``.
@@ -4793,6 +4843,15 @@ def apply_concat_apply(
         k = part_i + 1
         a = b
         depth += 1
+
+    if sort is not None:
+        if sort and split_out > 1:
+            raise NotImplementedError(
+                "Cannot guarentee sorted keys for `split_out>1`."
+                " Try using split_out=1, or grouping with sort=False."
+            )
+        aggregate_kwargs = aggregate_kwargs or {}
+        aggregate_kwargs["sort"] = sort
 
     # Aggregate
     for j in range(split_out):
@@ -5867,6 +5926,10 @@ def idxmaxmin_agg(x, fn=None, skipna=True, scalar=False):
         return res[0]
     res.name = None
     return res
+
+
+def _count_aggregate(x):
+    return x.sum().astype("int64")
 
 
 def safe_head(df, n):
