@@ -340,29 +340,7 @@ def outer(a, b):
 
 @derived_from(np)
 def kron(a, b):
-    a = array(a, ndmin=b.ndim)
-    ndb, nda = b.ndim, a.ndim
-    if nda == 0 or ndb == 0:
-        return multiply(a, b)
-    as_ = a.shape
-    bs = b.shape
-    nd = ndb
-    if ndb != nda:
-        if ndb > nda:
-            as_ = (1,) * (ndb - nda) + as_
-        else:
-            bs = (1,) * (nda - ndb) + bs
-            nd = nda
-    out_index = range(nd)
-    return blockwise(
-        np.kron,
-        out_index,
-        a,
-        out_index,
-        b,
-        out_index,
-        dtype=np.kron(a.dtype.type(), b.dtype.type()).dtype,
-    )
+    return map_blocks(np.kron, a, b)
 
 
 def _inner_apply_along_axis(arr, func1d, func1d_axis, func1d_args, func1d_kwargs):
